@@ -1,6 +1,7 @@
 import UIKit
+import WiggleSDK
 
-final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
+final class RollingBannerView: UIView {
     private var data: DI_TImageBanner?
     private var cellType: BaseCollectionViewCell.Type? {
         didSet {
@@ -18,7 +19,7 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
     private var displayMallInfo: DI_DisplayMallInfo = ServiceManager.shared.topDisplayMallInfo
     private var timeInterval: TimeInterval = 3.0
     private var impressionDic: [Int: Bool] = [:]
-    private var impressionPended: [DIR_DIReactingLog] = []
+    private var impressionPended: [Int: DIR_DIReactingLog] = [:]
     private var isAlwaysSend: Bool = true
 
     var cellActionClosure: ((String, Any?) -> Void)?
@@ -43,11 +44,6 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
     private weak var timer: Timer?
     private var pageIndex: Int = 0
 
-    deinit {
-        self.timer?.invalidate()
-        self.timer = nil
-    }
-
     private var collectionView: UICollectionView = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
 
     private var pageControlBoxType: BaseRollingControlView.Type?
@@ -64,6 +60,31 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
         ])
         return pcbView
     }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        self.viewDidAppear = {
+            [weak self] isVisible in
+            guard let self else { return }
+            if isVisible, self.impressionPended.count > 0 {
+                for dic in self.impressionPended {
+                    var impression = dic.value
+                    impression.sendLog()
+                    self.impressionDic[dic.key] = true
+                }
+                self.impressionPended.removeAll()
+            }
+        }
+    }
+
+    required init?(coder aDecoder: NSCoder) {
+        super.init(coder: aDecoder)
+    }
+
+    deinit {
+        self.timer?.invalidate()
+        self.timer = nil
+    }
 
     func configure(
         data: DI_TImageBanner?,
@@ -89,9 +110,9 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
         self.displayMallInfo = displayMallInfo
         self.setupCollectionView()
         self.setupPageControl()
-        self.setSelfHeight()
     }
 
+    // MARK: Set function
     private func setSelfHeight() {
         let collectionViewHeight = self.getRollingBannerSize(width: self.frame.width).height
         self.height = collectionViewHeight
@@ -109,10 +130,8 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
                   let actionName = RollingControlViewEvent(rawValue: actionType) else { return }
             switch actionName {
             case .showAll:
-//                self.onShowAllButton()
                 self.allButtonClosure?()
             case .autoRolling:
-//                self.onAutoRollingButton(actionData: actionData)
                 self.autoRollingButtonClosure?()
                 self.isBannerAutoRolling = actionData.isAutoRolling
                 if actionData.isAutoRolling {
@@ -133,7 +152,7 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
         self.collectionView.showsHorizontalScrollIndicator = false
         self.addSubViewAutoLayout(collectionView)
 
-        if data.banrList.count <= 1 {
+        if data.banrList.count == 1 {
             self.isInfinite = false
             self.isAlwaysSend = false
         }
@@ -168,6 +187,179 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
         }
     }
 
+    // 중앙 보내기
+    private var beforeWidth: CGFloat = 0
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let data, data.banrList.count > 0 else { return }
+        guard beforeWidth != self.frame.width else { return }
+        beforeWidth = self.frame.width
+        if self.isInfinite {
+            self.collectionView.scrollToItem(at: IndexPath(row: data.banrList.count, section: 0), at: .centeredHorizontally, animated: false)
+        }
+        self.setSelfHeight()
+    }
+
+    // MARK: AutoRolling
+    // 다음 페이지로 이동
+    private func toNextPage() {
+        guard let data, data.banrList.count > 0 else { return }
+        let currentOffset = self.collectionView.contentOffset.x
+        let targetOffset: CGFloat
+        if let layout = self.collectionView.collectionViewLayout as? UICollectionViewFlowLayout {
+            targetOffset = currentOffset + layout.itemSize.width
+        }
+        else {
+            targetOffset = currentOffset + self.collectionView.frame.width
+        }
+        self.collectionView.setContentOffset(CGPoint(x: targetOffset, y: self.collectionView.contentOffset.y), animated: true)
+    }
+
+    private func isCellVisible() -> Bool {
+        guard let window = self.window else { return false }
+
+        var currentView: UIView = self
+        while let superview = currentView.superview {
+            if window.bounds.intersects(currentView.windowFrame) == false {
+                return false
+            }
+
+            if (superview.bounds).intersects(currentView.frame) == false {
+                return false
+            }
+
+            if currentView.isHidden {
+                return false
+            }
+
+            if currentView.alpha == 0 {
+                return false
+            }
+
+            currentView = superview
+        }
+
+        return true
+    }
+
+    private func startAutoRolling() {
+        guard isBannerAutoRolling else { return }
+        guard timer == nil else { return }
+        guard UIAccessibility.isVoiceOverRunning == false else { return }
+
+        timer = Timer.scheduledTimer(withTimeInterval: self.timeInterval, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            guard self.isBannerAutoRolling, self.isCellVisible() else {
+                self.stopAutoRolling()
+                return
+            }
+            self.toNextPage()
+        }
+    }
+
+    private func stopAutoRolling() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    /// PageControllBox API
+    func setPageControlUI(cornerRadius: CGFloat = 0, bottom: CGFloat = 0, trailing: CGFloat = 0) {
+        guard let pageControlBoxView else { return }
+        pageControlBoxView.cornerRadius = cornerRadius
+        pageControlBoxView.ec.bottom = bottom
+        pageControlBoxView.ec.trailing = trailing
+    }
+
+    // 롤링배너뷰 의 높이(배너중 최대높이)를 리턴
+    func getRollingBannerSize(width: CGFloat) -> CGSize {
+        guard let data, data.banrList.count > 0, let cellType, let layout = self.collectionView.collectionViewLayout as? UICollectionViewFlowLayout else { return .zero }
+        if data.cvFirstItemSize != .zero {
+            return data.cvFirstItemSize
+        }
+        let cellWidth = width - self.sideInsets.left - self.sideInsets.right
+        let height: CGFloat = layout.sectionInset.top + layout.sectionInset.bottom
+        var cellHeight: CGFloat = 0
+        for banr in data.banrList {
+            let newCellHeight = cellType.getSize(data: banr, width: cellWidth).height
+            if cellHeight < newCellHeight {
+                cellHeight = newCellHeight
+            }
+        }
+        data.cvFirstItemSize = CGSize(width: width, height: height + cellHeight)
+        return CGSize(width: width, height: height + cellHeight)
+    }
+
+    // MARK: Impression
+    private func sendImpressionLog(collectionView: UICollectionView, cell: BaseCollectionViewCell, indexPath: IndexPath) {
+        guard let clickLog = cell.clickLog, let data, data.banrList.count > 0 else { return }
+        for var diImpressionLog in clickLog.diImpressionLogs {
+            var index = indexPath.row
+            if isInfinite {
+                index = indexPath.row % data.banrList.count
+            }
+            if diImpressionLog?.isAlwaysSend == true || ( self.impressionDic.keys.contains(index) == false || self.impressionDic[index] == false) {
+                if collectionView.isVisible {
+                    diImpressionLog?.sendLog()
+                    self.impressionDic[index] = true
+                }
+                else {
+                    self.impressionPended[index] = diImpressionLog
+                }
+            }
+        }
+        if DI_UserDefault.isDiReactionLogShow {
+            diImpressionLogShowLabel(view: cell, clickLog: clickLog)
+        }
+    }
+
+    private func diImpressionLogShowLabel(view: ImpressionLabelProtocol, clickLog: DIR_ClickLog?) {
+        view.resetImpressionLabels()
+        if let clickLog, clickLog.diImpressionLogs.count > 0 {
+            for diImpressionLog in clickLog.diImpressionLogs {
+                guard let diImpressionLog else { continue }
+                let label = view.getImpressionUseAbleLabel()
+                label.isHidden = false
+                label.text = "\(diImpressionLog.data.tarea_dtl_cd)"
+                label.tag_value = diImpressionLog
+                if diImpressionLog.data.tarea_dtl_cd == .t00000 {
+                    label.backgroundColor = UIColor(r: 129, g: 79, b: 227, a: 0.7)
+                    if diImpressionLog.data.tarea_dtl_info.advert_yn == "Y" {
+                        label.adsview0.isHidden = false
+                    }
+                }
+                else if diImpressionLog.data.tarea_dtl_cd == .t10000 {
+                    label.backgroundColor = UIColor(r: 191, g: 180, b: 92, a: 0.7)
+                    if diImpressionLog.data.tarea_dtl_info.advert_yn == "Y" {
+                        label.adsview1.isHidden = false
+                    }
+                }
+                label.sizeToFit()
+            }
+        }
+
+        view.impressionLabels.forEachEnumerated { offset, label in
+            if label.isHidden == false {
+                label.y = (CGFloat(offset) * (label.h)) + 3
+                view.bringSubviewToFront(label)
+            }
+        }
+    }
+
+    private func setClickLog(index: Int, banr: DI_TImageBannerUnit?) -> DIR_ClickLog {
+        guard let banr else { return DIR_ClickLog() }
+        var logData = self.clickLog
+        logData?.diImpressionLogs.removeAll()
+        var clickLog = self.clickLog
+        clickLog?.diReactingLog?.data.tarea_dtl_info.unit_inx = "\(index)"
+        clickLog?.diReactingLog?.data.tarea_dtl_cd = .t10000
+        banr.setDIReactionLog(&clickLog)
+        clickLog?.diReactingLog?.isAlwaysSend = self.isAlwaysSend
+        logData?.diImpressionLogs.append(clickLog?.diReactingLog)
+        return logData ?? DIR_ClickLog()
+    }
+}
+
+extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
         guard let data else { return .zero }
         var count = data.banrList.count
@@ -271,175 +463,9 @@ final class RollingBannerView: UIView, UICollectionViewDelegate, UICollectionVie
         self.pageControlBoxView?.updateData(data: pageControlData)
     }
 
-    // 중앙 보내기
-    private var beforeWidth: CGFloat = 0
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        guard let data, data.banrList.count > 0 else { return }
-        guard beforeWidth != self.frame.width else { return }
-        beforeWidth = self.frame.width
-        if self.isInfinite {
-            self.collectionView.scrollToItem(at: IndexPath(row: data.banrList.count, section: 0), at: .centeredHorizontally, animated: false)
-        }
-    }
-
-    // 다음 페이지로 이동, 자동롤링
-    private func toNextPage() {
-        guard let data, data.banrList.count > 0 else { return }
-        let currentOffset = self.collectionView.contentOffset.x
-        let targetOffset: CGFloat
-        if let layout = self.collectionView.collectionViewLayout as? UICollectionViewFlowLayout {
-            targetOffset = currentOffset + layout.itemSize.width
-        }
-        else {
-            targetOffset = currentOffset + self.collectionView.frame.width
-        }
-        self.collectionView.setContentOffset(CGPoint(x: targetOffset, y: self.collectionView.contentOffset.y), animated: true)
-    }
-
-    private func isCellVisible() -> Bool {
-        guard let window = self.window else { return false }
-
-        var currentView: UIView = self
-        while let superview = currentView.superview {
-            if window.bounds.intersects(currentView.windowFrame) == false {
-                return false
-            }
-
-            if (superview.bounds).intersects(currentView.frame) == false {
-                return false
-            }
-
-            if currentView.isHidden {
-                return false
-            }
-
-            if currentView.alpha == 0 {
-                return false
-            }
-
-            currentView = superview
-        }
-
-        return true
-    }
-
-    private func startAutoRolling() {
-        guard isBannerAutoRolling else { return }
-        guard timer == nil else { return }
-
-        timer = Timer.scheduledTimer(withTimeInterval: self.timeInterval, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            guard self.isBannerAutoRolling, self.isCellVisible() else {
-                self.stopAutoRolling()
-                return
-            }
-            self.toNextPage()
-        }
-    }
-
-    private func stopAutoRolling() {
-        timer?.invalidate()
-        timer = nil
-    }
-
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-        self.cellDisplayClosure?(collectionView, cell)
         guard let cell = cell as? BaseCollectionViewCell else { return }
+        self.cellDisplayClosure?(collectionView, cell)
         self.sendImpressionLog(collectionView: collectionView, cell: cell, indexPath: indexPath)
-    }
-
-    /// PageControllBox API
-    func setPageControlUI(cornerRadius: CGFloat = 0, bottom: CGFloat = 0, trailing: CGFloat = 0) {
-        guard let pageControlBoxView else { return }
-        pageControlBoxView.cornerRadius = cornerRadius
-        pageControlBoxView.ec.bottom = bottom
-        pageControlBoxView.ec.trailing = trailing
-    }
-
-    // 롤링배너뷰 의 높이(배너중 최대높이)를 리턴
-    func getRollingBannerSize(width: CGFloat) -> CGSize {
-        guard let data, data.banrList.count > 0, let cellType, let layout = self.collectionView.collectionViewLayout as? UICollectionViewFlowLayout else { return .zero }
-        if data.cvFirstItemSize != .zero {
-            return data.cvFirstItemSize
-        }
-        let cellWidth = width - self.sideInsets.left - self.sideInsets.right
-        let height: CGFloat = layout.sectionInset.top + layout.sectionInset.bottom
-        var cellHeight: CGFloat = 0
-        for banr in data.banrList {
-            let newCellHeight = cellType.getSize(data: banr, width: cellWidth).height
-            if cellHeight < newCellHeight {
-                cellHeight = newCellHeight
-            }
-        }
-        data.cvFirstItemSize = CGSize(width: width, height: height + cellHeight)
-        return CGSize(width: width, height: height + cellHeight)
-    }
-
-    private func sendImpressionLog(collectionView: UICollectionView, cell: BaseCollectionViewCell, indexPath: IndexPath) {
-        guard let clickLog = cell.clickLog, let data, data.banrList.count > 0 else { return }
-        print("221231 !!!! sendImpressionLog")
-        for var diImpressionLog in clickLog.diImpressionLogs {
-            var index = indexPath.row
-            if isInfinite {
-                index = indexPath.row % data.banrList.count
-            }
-            if diImpressionLog?.isAlwaysSend == true || self.impressionDic[index] == false {
-                if collectionView.isVisible {
-                    diImpressionLog?.sendLog()
-                    self.impressionDic[index] = true
-                    print("221231 !!!! sendImpressionLog index: \(index) \(self.impressionDic[index]) set")
-                }
-            }
-        }
-        if DI_UserDefault.isDiReactionLogShow {
-            diImpressionLogShowLabel(view: cell, clickLog: clickLog)
-        }
-    }
-
-    private func diImpressionLogShowLabel(view: ImpressionLabelProtocol, clickLog: DIR_ClickLog?) {
-        view.resetImpressionLabels()
-        if let clickLog, clickLog.diImpressionLogs.count > 0 {
-            for diImpressionLog in clickLog.diImpressionLogs {
-                guard let diImpressionLog else { continue }
-                let label = view.getImpressionUseAbleLabel()
-                label.isHidden = false
-                label.text = "\(diImpressionLog.data.tarea_dtl_cd)"
-                label.tag_value = diImpressionLog
-                if diImpressionLog.data.tarea_dtl_cd == .t00000 {
-                    label.backgroundColor = UIColor(r: 129, g: 79, b: 227, a: 0.7)
-                    if diImpressionLog.data.tarea_dtl_info.advert_yn == "Y" {
-                        label.adsview0.isHidden = false
-                    }
-                }
-                else if diImpressionLog.data.tarea_dtl_cd == .t10000 {
-                    label.backgroundColor = UIColor(r: 191, g: 180, b: 92, a: 0.7)
-                    if diImpressionLog.data.tarea_dtl_info.advert_yn == "Y" {
-                        label.adsview1.isHidden = false
-                    }
-                }
-                label.sizeToFit()
-            }
-        }
-
-        view.impressionLabels.forEachEnumerated { offset, label in
-            if label.isHidden == false {
-                label.y = (CGFloat(offset) * (label.h)) + 3
-                view.bringSubviewToFront(label)
-            }
-        }
-    }
-
-    private func setClickLog(index: Int, banr: DI_TImageBannerUnit?) -> DIR_ClickLog {
-        guard let banr else { return DIR_ClickLog() }
-        var logData = self.clickLog
-        logData?.diImpressionLogs.removeAll()
-        var clickLog = self.clickLog
-        clickLog?.diReactingLog?.data.tarea_dtl_info.unit_inx = "\(index)"
-        clickLog?.diReactingLog?.data.tarea_dtl_cd = .t10000
-        banr.setDIReactionLog(&clickLog)
-        clickLog?.diReactingLog?.isAlwaysSend = self.isAlwaysSend
-        logData?.diImpressionLogs.append(clickLog?.diReactingLog)
-        return logData ?? DIR_ClickLog()
     }
 }
