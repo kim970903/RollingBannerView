@@ -392,6 +392,12 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
         return CGSize(width: collectionView.frame.width - self.sideInsets.left - self.sideInsets.right, height: collectionView.frame.height)
     }
 
+    func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        guard let cell = cell as? BaseCollectionViewCell else { return }
+        self.cellDisplayClosure?(collectionView, cell)
+        self.sendImpressionLog(collectionView: collectionView, cell: cell, indexPath: indexPath)
+    }
+
     // 페이징
     func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
         guard let scrollView = scrollView as? UICollectionView else { return }
@@ -461,11 +467,5 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
         data.cvCurrentIndex = pageIndex
         pageControlData.currentPageIndex = pageIndex
         self.pageControlBoxView?.updateData(data: pageControlData)
-    }
-
-    func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
-        guard let cell = cell as? BaseCollectionViewCell else { return }
-        self.cellDisplayClosure?(collectionView, cell)
-        self.sendImpressionLog(collectionView: collectionView, cell: cell, indexPath: indexPath)
     }
 }
