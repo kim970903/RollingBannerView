@@ -1,8 +1,49 @@
 import UIKit
-import WiggleSDK
 
 final class RollingBannerView: UIView {
-    private var data: DI_TImageBanner?
+    @IBInspectable var cellName: String = "" {
+        didSet {
+            self.cellType = swiftClassFromString(cellName).self as? BaseCollectionViewCell.Type
+        }
+    }
+    @IBInspectable var itemSpacing: CGFloat = 0.0 {
+        didSet {
+            guard oldValue != self.itemSpacing else { return }
+            self.updateCollectionView()
+        }
+    }
+    @IBInspectable var leftInset: CGFloat = 0.0 {
+        didSet {
+            guard oldValue != self.leftInset else { return }
+            self.sideInsets.left = self.leftInset
+        }
+    }
+    @IBInspectable var rightInset: CGFloat = 0.0 {
+        didSet {
+            guard oldValue != self.rightInset else { return }
+            self.sideInsets.right = self.rightInset
+        }
+    }
+    @IBInspectable var topInset: CGFloat = 0.0 {
+        didSet {
+            guard oldValue != self.topInset else { return }
+            self.sideInsets.top = self.topInset
+        }
+    }
+    @IBInspectable var bottomInset: CGFloat = 0.0 {
+        didSet {
+            guard oldValue != self.bottomInset else { return }
+            self.sideInsets.bottom = self.bottomInset
+        }
+    }
+    var sideInsets: UIEdgeInsets = .zero {
+        didSet {
+            guard oldValue != sideInsets else { return }
+            self.updateCollectionView()
+        }
+    }
+
+    private var data: DI_RollingBanner?
     private var cellType: BaseCollectionViewCell.Type? {
         didSet {
             if let cellType {
@@ -13,8 +54,6 @@ final class RollingBannerView: UIView {
             }
         }
     }
-    private var itemSpacing: CGFloat = 0.0
-    private var sideInsets: UIEdgeInsets = .zero
     private var clickLog: DIR_ClickLog?
     private var displayMallInfo: DI_DisplayMallInfo = ServiceManager.shared.topDisplayMallInfo
     private var timeInterval: TimeInterval = 3.0
@@ -22,13 +61,10 @@ final class RollingBannerView: UIView {
     private var impressionPended: [Int: DIR_DIReactingLog] = [:]
     private var isAlwaysSend: Bool = true
 
-    var cellActionClosure: ((String, Any?) -> Void)?
     // 전체버튼 액션
     var allButtonClosure: (() -> Void)?
     // 자동재생/정지 액션
     var autoRollingButtonClosure: (() -> Void)?
-    // 리액팅 생성
-    var impressionClosure: ((Int) -> DIR_ClickLog)?
 
     // 스크롤 되는동안 호출
     var scrollClosure: ((UICollectionView) -> Void)?
@@ -38,6 +74,7 @@ final class RollingBannerView: UIView {
     var cellDisplayClosure: ((UICollectionView, UICollectionViewCell) -> Void)?
     // 스크롤 끝나면 호출
     var scrollFinishClosure: ((UICollectionView) -> Void)?
+    var scrollFinishCellClosure: ((UICollectionView, UICollectionViewCell) -> Void)?
 
     private var isInfinite: Bool = true
     private var isBannerAutoRolling: Bool = false
@@ -47,34 +84,10 @@ final class RollingBannerView: UIView {
     private var collectionView: UICollectionView = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
 
     private var pageControlBoxType: BaseRollingControlView.Type?
-    lazy var pageControlBoxView: BaseRollingControlView? = {
-        guard let pageControlBoxType else { return nil }
-        let pcbView = pageControlBoxType.init()
-        self.addSubview(pcbView)
-        pcbView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            pcbView.bottomAnchor.constraint(equalTo: self.bottomAnchor),
-            pcbView.trailingAnchor.constraint(equalTo: self.trailingAnchor),
-            pcbView.heightAnchor.constraint(equalToConstant: 32),
-            pcbView.widthAnchor.constraint(equalToConstant: 102)
-        ])
-        return pcbView
-    }()
+    private var pageControlBoxView: BaseRollingControlView?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        self.viewDidAppear = {
-            [weak self] isVisible in
-            guard let self else { return }
-            if isVisible, self.impressionPended.count > 0 {
-                for dic in self.impressionPended {
-                    var impression = dic.value
-                    impression.sendLog()
-                    self.impressionDic[dic.key] = true
-                }
-                self.impressionPended.removeAll()
-            }
-        }
     }
 
     required init?(coder aDecoder: NSCoder) {
@@ -86,23 +99,30 @@ final class RollingBannerView: UIView {
         self.timer = nil
     }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if self.window != nil {
+            self.startAutoRolling()
+        }
+    }
+
     func configure(
-        data: DI_TImageBanner?,
-        cellType: BaseCollectionViewCell.Type,
-        itemSpacing: CGFloat,
-        sideInsets: UIEdgeInsets,
-        clickLog: DIR_ClickLog? = nil,
+        data: DI_RollingBanner?,
+        cellType: BaseCollectionViewCell.Type? = nil,
+        isBannerAutoRolling: Bool = false,
+        clickLog: DIR_ClickLog?,
         isAlwaysSend: Bool = true,
         timeInterval: TimeInterval = 3.0,
         pageControlBoxType: BaseRollingControlView.Type? = nil,
-        displayMallInfo: DI_DisplayMallInfo,
-        cellActionClosure: ((String, Any?) -> Void)? = nil
+        displayMallInfo: DI_DisplayMallInfo
     ) {
         guard let data else { return }
         self.data = data
-        self.cellType = cellType
-        self.sideInsets = sideInsets
-        self.itemSpacing = itemSpacing
+        if self.cellName.isValid == false, let cellType {
+            self.cellType = cellType
+        }
+        self.isBannerAutoRolling = isBannerAutoRolling
+        self.data?.cvPageControlData?.isAutoRolling = isBannerAutoRolling
         self.clickLog = clickLog
         self.isAlwaysSend = isAlwaysSend
         self.timeInterval = timeInterval
@@ -122,9 +142,23 @@ final class RollingBannerView: UIView {
     }
 
     private func setupPageControl() {
-        guard let pageControlBoxView, let data else { return }
-        pageControlBoxView.isHidden = data.banrList.count <= 1
-        pageControlBoxView.configure(data: data.cvPageControlData, clickLog: self.clickLog) { [weak self] actionType, actionData in
+        guard let pageControlBoxType, let data else {
+            pageControlBoxView?.isHidden = true
+            return
+        }
+        let pcbView = pageControlBoxType.init()
+        self.pageControlBoxView = pcbView
+        self.pageControlBoxView?.isHidden = false
+        self.addSubview(pcbView)
+        pcbView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            pcbView.bottomAnchor.constraint(equalTo: self.bottomAnchor),
+            pcbView.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+            pcbView.heightAnchor.constraint(equalToConstant: 32),
+            pcbView.widthAnchor.constraint(equalToConstant: 102)
+        ])
+        pageControlBoxView?.isHidden = data.banrList.count <= 1
+        pageControlBoxView?.configure(data: data.cvPageControlData, clickLog: self.clickLog) { [weak self] actionType, actionData in
             guard let self,
                   let actionData = actionData as? UI_RollingControlView,
                   let actionName = RollingControlViewEvent(rawValue: actionType) else { return }
@@ -150,12 +184,32 @@ final class RollingBannerView: UIView {
         self.collectionView.isPagingEnabled = false
         self.collectionView.decelerationRate = .fast
         self.collectionView.showsHorizontalScrollIndicator = false
-        self.addSubViewAutoLayout(collectionView)
+        self.collectionView.tag = 221231
+        var isCollectionViewAdded: Bool = false
+        for subView in self.subviews {
+            if subView.tag == 221231 {
+                isCollectionViewAdded = true
+            }
+        }
+        if isCollectionViewAdded == false {
+            self.addSubViewAutoLayout(collectionView)
+        }
 
         if data.banrList.count == 1 {
             self.isInfinite = false
             self.isAlwaysSend = false
         }
+        if let layout = self.collectionView.collectionViewLayout as? UICollectionViewFlowLayout {
+            layout.scrollDirection = .horizontal
+            layout.minimumInteritemSpacing = 0
+            layout.sectionInset = self.sideInsets
+            layout.minimumLineSpacing = self.itemSpacing
+        }
+        self.collectionView.reloadData()
+        self.startAutoRolling()
+    }
+
+    private func updateCollectionView() {
         if let layout = self.collectionView.collectionViewLayout as? UICollectionViewFlowLayout {
             layout.scrollDirection = .horizontal
             layout.minimumInteritemSpacing = 0
@@ -271,7 +325,7 @@ final class RollingBannerView: UIView {
     }
 
     // 롤링배너뷰 의 높이(배너중 최대높이)를 리턴
-    func getRollingBannerSize(width: CGFloat) -> CGSize {
+    private func getRollingBannerSize(width: CGFloat) -> CGSize {
         guard let data, data.banrList.count > 0, let cellType, let layout = self.collectionView.collectionViewLayout as? UICollectionViewFlowLayout else { return .zero }
         if data.cvFirstItemSize != .zero {
             return data.cvFirstItemSize
@@ -287,6 +341,24 @@ final class RollingBannerView: UIView {
         }
         data.cvFirstItemSize = CGSize(width: width, height: height + cellHeight)
         return CGSize(width: width, height: height + cellHeight)
+    }
+
+    class func getRollingBannerHeight(width: CGFloat, data: DI_RollingBanner, cellType: BaseCollectionViewCell.Type, sideInsets: UIEdgeInsets) -> CGFloat {
+        guard data.banrList.count > 0 else { return .zero }
+        if data.cvFirstItemSize != .zero {
+            return data.cvFirstItemSize.height
+        }
+        let cellWidth = width - sideInsets.left - sideInsets.right
+        let height: CGFloat = sideInsets.top + sideInsets.bottom
+        var cellHeight: CGFloat = 0
+        for banr in data.banrList {
+            let newCellHeight = cellType.getSize(data: banr, width: cellWidth).height
+            if cellHeight < newCellHeight {
+                cellHeight = newCellHeight
+            }
+        }
+        data.cvFirstItemSize = CGSize(width: width, height: height + cellHeight)
+        return height + cellHeight
     }
 
     // MARK: Impression
@@ -345,7 +417,13 @@ final class RollingBannerView: UIView {
         }
     }
 
-    private func setClickLog(index: Int, banr: DI_TImageBannerUnit?) -> DIR_ClickLog {
+    private func sendAdsPVLog(data: DI_BannerListItem?) {
+        guard let data = data, data.cvSendAdsPVLog == false else { return }
+        data.cvSendAdsPVLog = true
+        data.sendPVAdsLog(self.clickLog)
+    }
+
+    private func setClickLog(index: Int, banr: DI_TBannerListItem?) -> DIR_ClickLog {
         guard let banr else { return DIR_ClickLog() }
         var logData = self.clickLog
         logData?.diImpressionLogs.removeAll()
@@ -394,8 +472,14 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
 
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
         guard let cell = cell as? BaseCollectionViewCell else { return }
+        guard let data, data.banrList.count > 0 else { return }
         self.cellDisplayClosure?(collectionView, cell)
         self.sendImpressionLog(collectionView: collectionView, cell: cell, indexPath: indexPath)
+        var index = indexPath.row
+        if isInfinite {
+            index = index % data.banrList.count
+        }
+        self.sendAdsPVLog(data: data.banrList[safe: index])
     }
 
     // 페이징
@@ -428,12 +512,31 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
         self.stopAutoRolling()
     }
 
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        guard let scrollView = scrollView as? UICollectionView else { return }
+        guard let data else { return }
+        guard let layout = scrollView.collectionViewLayout as? UICollectionViewFlowLayout else { return }
+        self.scrollFinishClosure?(scrollView)
+        let contentOffset = collectionView.contentOffset
+        let pageSize = layout.itemSize.width + layout.minimumLineSpacing
+        let pageIndex = (Int(round(contentOffset.x / pageSize)) % data.banrList.count) + data.banrList.count
+        guard let cell = scrollView.cellForItem(at: IndexPath(item: pageIndex, section: 0)) else { return }
+        self.scrollFinishCellClosure?(scrollView, cell)
+    }
+
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         guard let scrollView = scrollView as? UICollectionView else { return }
+        guard let data else { return }
+        guard let layout = scrollView.collectionViewLayout as? UICollectionViewFlowLayout else { return }
         self.scrollFinishClosure?(scrollView)
         if self.isBannerAutoRolling {
             self.startAutoRolling()
         }
+        let contentOffset = collectionView.contentOffset
+        let pageSize = layout.itemSize.width + layout.minimumLineSpacing
+        let pageIndex = (Int(round(contentOffset.x / pageSize)) % data.banrList.count) + data.banrList.count
+        guard let cell = scrollView.cellForItem(at: IndexPath(item: pageIndex, section: 0)) else { return }
+        self.scrollFinishCellClosure?(scrollView, cell)
     }
 
     // 무한 옮겨주기
@@ -446,10 +549,10 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
         if isInfinite {
             let maxX = pageSize * CGFloat(data.banrList.count * 2)
             let minX = pageSize * CGFloat(data.banrList.count)
-            if contentOffset.x > maxX {
+            if contentOffset.x > maxX - pageSize * 0.3 {
                 collectionView.contentOffset = CGPoint(x: contentOffset.x - pageSize * CGFloat(data.banrList.count), y: 0)
             }
-            else if contentOffset.x < minX {
+            else if contentOffset.x < minX - pageSize * 0.3 {
                 collectionView.contentOffset = CGPoint(x: contentOffset.x + pageSize * CGFloat(data.banrList.count), y: 0)
             }
         }
@@ -467,5 +570,13 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
         data.cvCurrentIndex = pageIndex
         pageControlData.currentPageIndex = pageIndex
         self.pageControlBoxView?.updateData(data: pageControlData)
+    }
+}
+
+extension RollingBannerView {
+    func getVisibleCells() -> [UICollectionViewCell] {
+        let cells = self.collectionView.visibleCells
+        guard cells.count > 0 else { return [] }
+        return cells
     }
 }
