@@ -217,14 +217,7 @@ final class RollingBannerView: UIView {
 
     private func setupCollectionView() {
         guard let data, data.rollingList.count > 0 else { return }
-        self.collectionView.tag = 221231
-        var isCollectionViewAdded: Bool = false
-        for subView in self.subviews {
-            if subView.tag == 221231 {
-                isCollectionViewAdded = true
-            }
-        }
-        if isCollectionViewAdded == false {
+        if self.collectionView.superview == nil {
             self.addSubViewAutoLayout(collectionView)
         }
         self.collectionView.isScrollEnabled = data.rollingList.count > 1
@@ -266,7 +259,7 @@ final class RollingBannerView: UIView {
                 // 동영상의 자동 재생일 경우 오토롤링은 일단 끄고 노티받으면 켜준다.
                 self.isBannerAutoRolling = false
             case .playEnd:
-                // 동영상이 모두 재생된 후 메인 롤링 넘어가야 한다.
+                // 동영상이 모두 재생된 후 메인 롤링 넘어가야 한다.(GRCR011 1-1)
                 if let isAutoRolling = data.cvPageControlData?.isAutoRolling {
                     self.isBannerAutoRolling = isAutoRolling
                     if isAutoRolling {
