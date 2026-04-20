@@ -246,6 +246,7 @@ final class RollingBannerView: UIView {
     private func scrollWithSafeIndex(_ index: Int) {
         self.collectionView.reloadData()
         self.collectionView.layoutIfNeeded()
+        guard data?.rollingList.count > 1 else { return }
 
         guard index >= 0, self.collectionView.numberOfSections > 0, self.collectionView.numberOfItems(inSection: 0) > 0, index < self.collectionView.numberOfItems(inSection: 0) else { return }
         self.collectionView.scrollToItem(at: IndexPath(row: index, section: 0), at: .centeredHorizontally, animated: false)
@@ -330,6 +331,7 @@ final class RollingBannerView: UIView {
     }
 
     private func startAutoRolling() {
+        guard data?.rollingList.count > 1 else { return }
         guard isBannerAutoRolling else { return }
         guard timer == nil else { return }
         guard UIAccessibility.isVoiceOverRunning == false else { return }
