@@ -137,6 +137,10 @@ final class RollingBannerView: UIView {
                 }
                 self.impressionPended.removeAll()
             }
+
+            if isVisible {
+                self.startAutoRolling()
+            }
         }
     }
 
