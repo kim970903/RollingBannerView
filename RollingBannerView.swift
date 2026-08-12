@@ -3,10 +3,13 @@ import WiggleSDK
 
 final class UI_RollingBannerData {
     var rollingList: [Any] = []
+    var subData: [String: Any?]?
 
     var cvMaxItemSize: CGSize = .zero
+    var isUsingFirstCellSize: Bool = false
     var cvCurrentIndex: Int = 0
     var cvPageControlData: UI_RollingControlView?
+    var cvPausedByMovie: Bool = false
 }
 
 final class RollingBannerView: UIView {
@@ -69,6 +72,12 @@ final class RollingBannerView: UIView {
     private var impressionPended: [Int: DIR_DIReactingLog] = [:]
     private var isAlwaysSend: Bool = false
 
+    enum RollingBannerAlignment {
+        case center
+        case left
+    }
+    private var alignment: RollingBannerAlignment = .center
+
     // 전체버튼 액션
     var allButtonClosure: (() -> Void)?
     // 자동재생/정지 액션
@@ -87,9 +96,11 @@ final class RollingBannerView: UIView {
     // 무한롤링 여부
     private var enableInfinite: Bool = false
     private var isInfinite: Bool {
-        return enableInfinite && self.data?.rollingList.count > 1
+        return enableInfinite && self.data?.rollingList.count > 1 && UIAccessibility.isVoiceOverRunning == false
     }
-    private var isBannerAutoRolling: Bool = false
+    // 오토롤링
+    private var enableAutoRolling: Bool = false // 오토롤링을 허용 O/X
+    private var isBannerAutoRolling: Bool = false // 버튼동작으로 오토롤링 재생/일시정지
     private weak var timer: Timer?
     private var pageIndex: Int = 0
 
@@ -97,6 +108,11 @@ final class RollingBannerView: UIView {
 
     private var pageControlBoxType: BaseRollingControlView.Type?
     private var pageControlBoxView: BaseRollingControlView?
+    private var pageControlBottomConstraint: NSLayoutConstraint?
+    private var pageControlTrailingConstraint: NSLayoutConstraint?
+    private var pageControlCenterXConstraint: NSLayoutConstraint?
+    // 배너 영역 넘는 페이지 컨트롤 터치허용
+    var allowOutSideTouch: Bool = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -120,15 +136,33 @@ final class RollingBannerView: UIView {
         }
     }
 
+    // 컨트롤러가 배너 영역 밖에 있을경우 터치 대응
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if super.point(inside: point, with: event) {
+            return true
+        }
+
+        guard self.allowOutSideTouch, let pageControlBoxView, pageControlBoxView.isHidden == false else {
+            return false
+        }
+
+        let convertedPoint = pageControlBoxView.convert(point, from: self)
+        return pageControlBoxView.point(inside: convertedPoint, with: event)
+    }
+
     private func setup() {
+        self.backgroundColor = .clear
+        self.clipsToBounds = false
         self.collectionView.delegate = self
         self.collectionView.dataSource = self
         self.collectionView.isPagingEnabled = false
         self.collectionView.decelerationRate = .fast
         self.collectionView.showsHorizontalScrollIndicator = false
+        self.collectionView.backgroundColor = .clear
         self.viewDidAppear = {
             [weak self] isVisible in
             guard let self else { return }
+            guard let data else { return }
             if isVisible, self.impressionPended.count > 0 {
                 for dic in self.impressionPended {
                     var impression = dic.value
@@ -138,7 +172,7 @@ final class RollingBannerView: UIView {
                 self.impressionPended.removeAll()
             }
 
-            if isVisible {
+            if isVisible, data.cvPausedByMovie == false {
                 self.startAutoRolling()
             }
         }
@@ -147,6 +181,7 @@ final class RollingBannerView: UIView {
     func configure(
         data: UI_RollingBannerData?,
         cellType: BaseCollectionViewCell.Type? = nil,
+        alignment: RollingBannerAlignment = .center,
         enableInfinite: Bool = false,
         enableAutoRolling: Bool = false,
         clickLog: DIR_ClickLog?,
@@ -159,9 +194,11 @@ final class RollingBannerView: UIView {
         if self.cellName.isValid == false, let cellType {
             self.cellType = cellType
         }
+        self.alignment = alignment
         self.enableInfinite = enableInfinite
+        self.enableAutoRolling = enableAutoRolling
         if enableAutoRolling {
-            self.isBannerAutoRolling = data.cvPageControlData?.isAutoRolling ?? true
+            self.isBannerAutoRolling = WG_CommonFunc.isVoiceOverState() ? false : data.cvPageControlData?.isAutoRolling ?? true
         }
         else {
             self.isBannerAutoRolling = false
@@ -170,6 +207,9 @@ final class RollingBannerView: UIView {
         self.clickLog = clickLog
         self.isAlwaysSend = isAlwaysSend
         self.timeInterval = timeInterval
+        if WG_CommonFunc.isVoiceOverState(), timeInterval < 5.0 {
+            self.timeInterval = 5.0
+        }
         self.pageControlBoxType = pageControlBoxType
         self.setupCollectionView()
         self.setupPageControl()
@@ -177,7 +217,10 @@ final class RollingBannerView: UIView {
 
     // MARK: Set function
     private func setSelfHeight() {
-        let collectionViewHeight = RollingBannerView.getRollingBannerSize(width: self.frame.width, data: self.data, cellType: self.cellType, sideInsets: self.edgeInsets).height
+        let width = self.bounds.width
+        guard width > 0 else { return }
+        let collectionViewHeight = RollingBannerView.getRollingBannerSize(width: width, data: self.data, cellType: self.cellType, sideInsets: self.edgeInsets).height
+        guard self.height != collectionViewHeight else { return }
         self.height = collectionViewHeight
         if self.ec.isHeight {
             self.ec.height = collectionViewHeight
@@ -191,10 +234,15 @@ final class RollingBannerView: UIView {
             let pcbView = pageControlBoxType.init()
             self.pageControlBoxView = pcbView
             self.addSubview(pcbView)
+
+            let bottomConstraint = pcbView.bottomAnchor.constraint(equalTo: self.bottomAnchor)
+            self.pageControlBottomConstraint = bottomConstraint
+            let trailingConstraint = pcbView.trailingAnchor.constraint(equalTo: self.trailingAnchor)
+            self.pageControlTrailingConstraint = trailingConstraint
             pcbView.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                pcbView.bottomAnchor.constraint(equalTo: self.bottomAnchor),
-                pcbView.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+                bottomConstraint,
+                trailingConstraint,
                 pcbView.heightAnchor.constraint(equalToConstant: 32),
                 pcbView.widthAnchor.constraint(equalToConstant: 102)
             ])
@@ -233,7 +281,9 @@ final class RollingBannerView: UIView {
         }
 
         self.scrollWithSafeIndex(isInfinite ? ((data.cvCurrentIndex % data.rollingList.count) + data.rollingList.count) : data.cvCurrentIndex)
-        self.startAutoRolling()
+        if data.cvPausedByMovie == false {
+            self.startAutoRolling()
+        }
     }
 
     private func updateCollectionView() {
@@ -253,22 +303,30 @@ final class RollingBannerView: UIView {
         guard data?.rollingList.count > 1 else { return }
 
         guard index >= 0, self.collectionView.numberOfSections > 0, self.collectionView.numberOfItems(inSection: 0) > 0, index < self.collectionView.numberOfItems(inSection: 0) else { return }
-        self.collectionView.scrollToItem(at: IndexPath(row: index, section: 0), at: .centeredHorizontally, animated: false)
+        var scrollType: UICollectionView.ScrollPosition = .centeredHorizontally
+        if self.alignment == .left {
+            scrollType = .left
+        }
+        self.collectionView.scrollToItem(at: IndexPath(row: index, section: 0), at: scrollType, animated: false)
     }
 
-    private func onMovieAction(actionType: String) {
+    private func onMovieAction(actionType: String, index: Int) {
         guard let data else { return }
         if let action = MovieViewState(rawValue: actionType) {
             switch action {
             case .autoPlaying:
                 // 동영상의 자동 재생일 경우 오토롤링은 일단 끄고 노티받으면 켜준다.
+                guard index >= data.rollingList.count, index < data.rollingList.count * 2 else { return }
                 self.isBannerAutoRolling = false
+                data.cvPausedByMovie = true
             case .playEnd:
-                // 동영상이 모두 재생된 후 메인 롤링 넘어가야 한다.(GRCR011 1-1)
+                data.cvPausedByMovie = false
                 if let isAutoRolling = data.cvPageControlData?.isAutoRolling {
                     self.isBannerAutoRolling = isAutoRolling
                     if isAutoRolling {
-                        self.startAutoRolling()
+                        guard data.rollingList.count > 1 else { return }
+                        guard isBannerAutoRolling else { return }
+                        self.toNextPage()
                     }
                 }
             default:
@@ -299,11 +357,25 @@ final class RollingBannerView: UIView {
 
     // MARK: AutoRolling
     // 다음 페이지로 이동
-    private func toNextPage() {
+    func toNextPage() {
         guard let data, data.rollingList.count > 0, data.cvMaxItemSize.width > 0 else { return }
-        let currentOffset = self.collectionView.contentOffset.x
-        let targetOffset: CGFloat
-        targetOffset = currentOffset + data.cvMaxItemSize.width + self.itemSpacing
+        let pageSize: CGFloat = data.cvMaxItemSize.width + self.itemSpacing
+        let currentIndex: Int = self.isInfinite ? (((data.cvCurrentIndex) % data.rollingList.count) + data.rollingList.count) : (data.cvCurrentIndex)
+        if self.isInfinite == false, (currentIndex + 1) >= data.rollingList.count {
+            return
+        }
+        let correctedCurrentOffset = CGFloat(currentIndex) * pageSize
+        let targetOffset: CGFloat = correctedCurrentOffset + pageSize
+        self.collectionView.setContentOffset(CGPoint(x: targetOffset, y: self.collectionView.contentOffset.y), animated: true)
+    }
+
+    func toPrevPage() {
+        guard let data, data.rollingList.count > 0, data.cvMaxItemSize.width > 0 else { return }
+        let pageSize: CGFloat = data.cvMaxItemSize.width + self.itemSpacing
+        let currentIndex: Int = self.isInfinite ? (((data.cvCurrentIndex) % data.rollingList.count) + data.rollingList.count) : (data.cvCurrentIndex)
+        guard (currentIndex - 1) >= 0 else { return }
+        let correctedCurrentOffset = CGFloat(currentIndex) * pageSize
+        let targetOffset: CGFloat = correctedCurrentOffset - pageSize
         self.collectionView.setContentOffset(CGPoint(x: targetOffset, y: self.collectionView.contentOffset.y), animated: true)
     }
 
@@ -338,7 +410,6 @@ final class RollingBannerView: UIView {
         guard data?.rollingList.count > 1 else { return }
         guard isBannerAutoRolling else { return }
         guard timer == nil else { return }
-        guard UIAccessibility.isVoiceOverRunning == false else { return }
 
         timer = Timer.scheduledTimer(withTimeInterval: self.timeInterval, repeats: true) { [weak self] _ in
             guard let self = self else { return }
@@ -356,11 +427,41 @@ final class RollingBannerView: UIView {
     }
 
     /// PageControllBox API
-    func setPageControlUI(cornerRadius: CGFloat = 0, bottom: CGFloat = 0, trailing: CGFloat = 0) {
+    func setPageControlUI(bottom: CGFloat = 0, trailing: CGFloat = 0) {
         guard let pageControlBoxView else { return }
-        pageControlBoxView.cornerRadius = cornerRadius
         pageControlBoxView.ec.bottom = bottom
         pageControlBoxView.ec.trailing = trailing
+    }
+
+    func setPageControlBottom(_ spacing: CGFloat) {
+        guard let pageControlBoxView else { return }
+        pageControlBoxView.ec.bottom = spacing
+    }
+
+    func setPageControlTrailing(_ spacing: CGFloat) {
+        guard pageControlBoxView != nil else { return }
+        pageControlCenterXConstraint?.isActive = false
+        pageControlTrailingConstraint?.isActive = true
+        pageControlTrailingConstraint?.constant = -spacing
+    }
+
+    func setPageControlCornerRadius(_ radius: CGFloat ) {
+        guard let pageControlBoxView else { return }
+        pageControlBoxView.layer.cornerRadius = radius
+    }
+
+    func setPageControlRoundCorners(_ corners: UIRectCorner, radiusToken: RadiusToken) {
+        guard let pageControlBoxView else { return }
+        pageControlBoxView.roundCorners(corners, radiusToken: radiusToken)
+    }
+
+    func setPageControlCenterX() {
+        guard let pageControlBoxView else { return }
+        if self.pageControlCenterXConstraint == nil {
+            self.pageControlCenterXConstraint = pageControlBoxView.centerXAnchor.constraint(equalTo: self.centerXAnchor)
+        }
+        self.pageControlCenterXConstraint?.isActive = true
+        self.pageControlTrailingConstraint?.isActive = false
     }
 
     // 롤링배너뷰 의 높이 (배너중 최대높이 + 상하 인셋) 리턴
@@ -373,16 +474,23 @@ final class RollingBannerView: UIView {
 
     class func setItemSize(width: CGFloat, data: UI_RollingBannerData, cellType: BaseCollectionViewCell.Type?, sideInsets: UIEdgeInsets) -> CGSize {
         guard data.rollingList.count > 0, let cellType else { return .zero }
-        if data.cvMaxItemSize != .zero, data.cvMaxItemSize.width == width { return data.cvMaxItemSize }
         let cellWidth = width - sideInsets.left - sideInsets.right
-        var cellHeight: CGFloat = 0
-        for banr in data.rollingList {
-            let newCellHeight = cellType.getSize(data: banr, width: cellWidth).height
-            if cellHeight < newCellHeight {
-                cellHeight = newCellHeight
+        if data.cvMaxItemSize != .zero, data.cvMaxItemSize.width == cellWidth { return data.cvMaxItemSize }
+        if data.isUsingFirstCellSize {
+            if let firstBanr = data.rollingList.first {
+                data.cvMaxItemSize = cellType.getSize(data: firstBanr, width: cellWidth)
             }
         }
-        data.cvMaxItemSize = CGSize(width: cellWidth, height: cellHeight)
+        else {
+            var cellHeight: CGFloat = 0
+            for banr in data.rollingList {
+                let newCellHeight = cellType.getSize(data: banr, width: cellWidth).height
+                if cellHeight < newCellHeight {
+                    cellHeight = newCellHeight
+                }
+            }
+            data.cvMaxItemSize = CGSize(width: cellWidth, height: cellHeight)
+        }
         return data.cvMaxItemSize
     }
 
@@ -489,10 +597,10 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
         }
         cell.actionClosure = { [weak self] actionType, _ in
             guard let self else { return }
-            self.onMovieAction(actionType: actionType)
+            self.onMovieAction(actionType: actionType, index: indexPath.row)
         }
         let logData = self.setClickLog(index: index, rollingItem: data.rollingList[safe: index])
-        cell.configure(data: data.rollingList[safe: index], clickLog: logData)
+        cell.configure(data: data.rollingList[safe: index], clickLog: logData, subData: data.subData)
         return cell
     }
 
@@ -545,10 +653,13 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
         guard let scrollView = scrollView as? UICollectionView else { return }
         guard let data, data.rollingList.count > 0, data.cvMaxItemSize.width > 0 else { return }
+        data.cvPausedByMovie = false
         self.scrollFinishClosure?(scrollView, data.cvCurrentIndex)
         let contentOffset = collectionView.contentOffset
         let pageSize = data.cvMaxItemSize.width + self.itemSpacing
-        let pageIndex = (Int(round(contentOffset.x / pageSize)) % data.rollingList.count) + data.rollingList.count
+        let pageIndex = self.isInfinite ? (Int(round(contentOffset.x / pageSize)) % data.rollingList.count) + data.rollingList.count : (Int(round(contentOffset.x / pageSize)) % data.rollingList.count)
+        let adjustedOffset = CGFloat(pageIndex) * pageSize
+        self.collectionView.setContentOffset(CGPoint(x: adjustedOffset, y: contentOffset.y), animated: false)
         guard let cell = scrollView.cellForItem(at: IndexPath(item: pageIndex, section: 0)) else { return }
         self.scrollFinishCellClosure?(scrollView, cell)
     }
@@ -556,13 +667,16 @@ extension RollingBannerView: UICollectionViewDelegate, UICollectionViewDataSourc
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         guard let scrollView = scrollView as? UICollectionView else { return }
         guard let data, data.rollingList.count > 0, data.cvMaxItemSize.width > 0 else { return }
+        data.cvPausedByMovie = false
         self.scrollFinishClosure?(scrollView, data.cvCurrentIndex)
         if self.isBannerAutoRolling {
             self.startAutoRolling()
         }
         let contentOffset = collectionView.contentOffset
         let pageSize = data.cvMaxItemSize.width + self.itemSpacing
-        let pageIndex = (Int(round(contentOffset.x / pageSize)) % data.rollingList.count) + data.rollingList.count
+        let pageIndex = self.isInfinite ? (Int(round(contentOffset.x / pageSize)) % data.rollingList.count) + data.rollingList.count : (Int(round(contentOffset.x / pageSize)) % data.rollingList.count)
+        let adjustedOffset = CGFloat(pageIndex) * pageSize
+        self.collectionView.setContentOffset(CGPoint(x: adjustedOffset, y: contentOffset.y), animated: false)
         guard let cell = scrollView.cellForItem(at: IndexPath(item: pageIndex, section: 0)) else { return }
         self.scrollFinishCellClosure?(scrollView, cell)
     }
@@ -605,5 +719,48 @@ extension RollingBannerView {
         let cells = self.collectionView.visibleCells
         guard cells.count > 0 else { return [] }
         return cells
+    }
+
+    func setControlBoxHidden(_ isHidden: Bool) {
+        self.pageControlBoxView?.isHidden = isHidden
+    }
+}
+
+// 접근성 API
+extension RollingBannerView {
+    // 접근성 래퍼뷰에 포커싱을 주기위해 컬렉션 뷰의 접근성 해제 ( 컨트롤러는 포커싱,클릭 되어야해서 해제하지 않음 )
+    func setRollingBannerViewAccessibility(_ isEnabled: Bool) {
+        self.collectionView.isAccessibilityElement = isEnabled
+        self.collectionView.accessibilityElementsHidden = isEnabled == false
+    }
+
+    // 현재 중앙에 노출되고 있는 배너의 접근성 텍스트
+    func getCurrentCellAccessibilityLabel() -> String {
+        guard let data, data.rollingList.count > 0 else { return "" }
+        guard let cell = self.collectionView.cellForItem(at: IndexPath(row: data.cvCurrentIndex, section: 0)) as? RollingBannerCellAccessibilityProtocol else { return "" }
+        return cell.bannerAccessibilityLabel + " \(data.rollingList.count) 개 중 \(data.cvCurrentIndex + 1) 번째 배너 표시중"
+    }
+
+    // 접근성 상태 변화시에 제공하는 텍스트
+//    func getAccessibilityValue() -> String {
+//        guard let data, data.rollingList.count > 0 else { return "" }
+//        let currentIndex = data.cvCurrentIndex
+//        let totalCount = data.rollingList.count
+//        return "\(totalCount) 개 중 \(currentIndex + 1) 번째 배너 표시중"
+//    }
+
+    // 현재 중앙의 배너 클릭 액션을 전달 -> 래퍼뷰가 이 액션을 받아서 처리
+    func currentCellAccessibilityAction() -> Bool {
+        guard let data, data.rollingList.count > 0 else { return false }
+        guard let cell = self.collectionView.cellForItem(at: IndexPath(row: data.cvCurrentIndex, section: 0)) as? RollingBannerCellAccessibilityProtocol else { return false }
+        cell.accessibilityActionClosure?()
+        return true
+    }
+
+    // 래퍼뷰로 컨트롤러 클릭이 막히지 않게 클릭영역판단
+    func isPageControlBoxClick(point: CGPoint) -> Bool {
+        guard let pageControlBoxView else { return false }
+        let convertedPoint = pageControlBoxView.convert(point, from: self)
+        return pageControlBoxView.point(inside: convertedPoint, with: nil)
     }
 }
